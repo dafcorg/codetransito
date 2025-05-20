@@ -8,6 +8,8 @@ The script will:
     • download CIFAR‑10 to <data_dir> (default: ./data)
     • save checkpoints to <output_dir> (default: ./runs)
     • log metrics per epoch in JSON (<output_dir>/metrics.json)
+Monitor
+nvidia-smi --query-gpu=timestamp,index,utilization.gpu,utilization.memory,memory.used,temperature.gpu,power.draw,power.limit --format=csv -l 5 >> gpu_metrics.csv
 """
 
 import argparse
