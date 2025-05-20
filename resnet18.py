@@ -1,7 +1,21 @@
 #!/usr/bin/env python
 """Train ResNet‑18 on CIFAR‑10 with minimal dependencies.
+
+python -m venv venv-resnet
+source venv-resnet/bin/activate         # en Windows: venv-resnet\\Scripts\\activate
+
+# 2) Instala PyTorch con soporte CUDA 11.8 (cambia la versión si tu GPU va con 12.x)
+pip install torch==2.2.0+cu118 torchvision==0.17.0+cu118 --index-url https://download.pytorch.org/whl/cu118
+
+# 3) Resto de utilidades usadas por el script
+pip install numpy==1.26.4 tqdm==4.66.1
+
+# 4) (OPCIONAL) Para logs en TensorBoard o Weights-and-Biases
+pip install tensorboard==2.16.2 wandb==0.17.0
+
+
 Usage (single‑GPU):
-    python train_resnet18_cifar10.py --epochs 90 --batch_size 256
+    python resnet18.py --epochs 90 --batch_size 256
 Usage (multi‑GPU DataParallel):
     python train_resnet18_cifar10.py --epochs 90 --batch_size 256 --gpus 2
 The script will:
