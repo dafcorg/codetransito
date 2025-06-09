@@ -4,7 +4,6 @@ import os
 import random
 import time
 import threading
-import csv
 from datetime import datetime
 
 import torch
@@ -15,36 +14,24 @@ import torchvision.transforms as T
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import pynvml
-from thop import profile  # para contar FLOPs
+from torch.profiler import profile, record_function, ProfilerActivity
 
-# --------------------------------------------
-# Hilo de muestreo completo de métricas GPU ---
-# --------------------------------------------
-class GPUSampler(threading.Thread):
-    def __init__(self, handle, interval=0.5):
+# --------------------------------------------------
+# Hilo para muestreo de potencia GPU via NVML
+# --------------------------------------------------
+class PowerSampler(threading.Thread):
+    def __init__(self, handle, interval=1.0):
         super().__init__(daemon=True)
         self.handle = handle
         self.interval = interval
-        self.samples = []  # lista de dicts con métricas
+        self.samples = []  # [(timestamp, power_W)]
         self._stop = threading.Event()
 
     def run(self):
         while not self._stop.is_set():
             ts = time.time()
             power_mW = pynvml.nvmlDeviceGetPowerUsage(self.handle)
-            temp = pynvml.nvmlDeviceGetTemperature(self.handle, pynvml.NVML_TEMPERATURE_GPU)
-            mem = pynvml.nvmlDeviceGetMemoryInfo(self.handle)
-            util = pynvml.nvmlDeviceGetUtilizationRates(self.handle)
-
-            self.samples.append({
-                'timestamp': ts,
-                'power_W': power_mW / 1000.0,
-                'temperature_C': temp,
-                'memory_used_MB': mem.used / (1024**2),
-                'memory_total_MB': mem.total / (1024**2),
-                'util_gpu_pct': util.gpu,
-                'util_mem_pct': util.memory
-            })
+            self.samples.append((ts, power_mW / 1000.0))
             time.sleep(self.interval)
 
     def stop(self):
@@ -55,31 +42,15 @@ class GPUSampler(threading.Thread):
             return 0.0
         energy_j = 0.0
         for i in range(1, len(self.samples)):
-            t0, p0 = self.samples[i-1]['timestamp'], self.samples[i-1]['power_W']
-            t1, p1 = self.samples[i]['timestamp'], self.samples[i]['power_W']
+            t0, p0 = self.samples[i-1]
+            t1, p1 = self.samples[i]
             dt = t1 - t0
             energy_j += ((p0 + p1) / 2) * dt
         return energy_j / 3600.0
 
-    def dump_csv(self, filepath):
-        if not self.samples:
-            return
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        with open(filepath, 'w', newline='') as f:
-            writer = csv.DictWriter(
-                f,
-                fieldnames=[
-                    'timestamp', 'power_W', 'temperature_C',
-                    'memory_used_MB', 'memory_total_MB',
-                    'util_gpu_pct', 'util_mem_pct'
-                ]
-            )
-            writer.writeheader()
-            writer.writerows(self.samples)
-
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train ResNet-18 on CIFAR-10 (instrumented GPU) ")
+    parser = argparse.ArgumentParser(description="Train ResNet‑18 on CIFAR‑10 (instrumented)")
     parser.add_argument("--epochs", type=int, default=90)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=0.1)
@@ -111,8 +82,8 @@ def get_dataloaders(data_dir, batch_size):
         T.Normalize(mean, std),
     ])
     train_ds = torchvision.datasets.CIFAR10(root=data_dir, train=True, download=True, transform=train_tf)
-    test_ds  = torchvision.datasets.CIFAR10(root=data_dir, train=False,download=True, transform=test_tf)
-    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+    test_ds  = torchvision.datasets.CIFAR10(root=data_dir, train=False, download=True, transform=test_tf)
+    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=4, pin_memory=True)
     test_dl  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
     return train_dl, test_dl
 
@@ -164,24 +135,11 @@ def main():
     pynvml.nvmlInit()
     gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
 
-    # Carga datos
     train_dl, test_dl = get_dataloaders(args.data_dir, args.batch_size)
-
-    # Construye y envía modelo
     model = torchvision.models.resnet18(num_classes=10)
     if torch.cuda.device_count() >= args.gpus > 1:
         model = nn.DataParallel(model, device_ids=list(range(args.gpus)))
     model.to(device)
-
-    # --------------------------------------
-    # Contar FLOPs (forward) y por batch ---
-    model.eval()
-    dummy = torch.randn(1, 3, 32, 32, device=device)
-    macs, _ = profile(model, inputs=(dummy,), verbose=False)
-    flops_forward = macs * 2
-    flops_per_batch = flops_forward * 2 * args.batch_size
-    print(f"FLOPs forward: {flops_forward:.2e}, FLOPs/batch: {flops_per_batch:.2e}")
-    # --------------------------------------
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
@@ -192,25 +150,33 @@ def main():
 
     for epoch in range(1, args.epochs + 1):
         print(f"\n=== Epoch {epoch}/{args.epochs} ===")
-        sampler = GPUSampler(gpu_handle, interval=0.5)
+
+        # Iniciar muestreo de potencia
+        sampler = PowerSampler(gpu_handle)
         sampler.start()
+
+        # Medir tiempo y FLOPs reales
         t0 = time.time()
-
-        train_loss, train_acc = train_one_epoch(model, train_dl, criterion, optimizer, device)
-
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            record_shapes=True,
+            with_flops=True
+        ) as prof:
+            train_loss, train_acc = train_one_epoch(model, train_dl, criterion, optimizer, device)
         t1 = time.time()
+
+        # Detener muestreo de potencia
         sampler.stop()
         sampler.join()
 
-        epoch_time   = t1 - t0
+        # Cálculos de métricas
+        epoch_time = t1 - t0
         epoch_energy = sampler.energy_wh()
-        steps_epoch  = len(train_dl)
-        flops_epoch  = flops_per_batch * steps_epoch
-        gflops_real  = flops_epoch / (epoch_time * 1e9)
 
-        # Guardar CSV de métricas GPU
-        csv_path = os.path.join(args.output_dir, f"epoch_{epoch}_gpu_metrics.csv")
-        sampler.dump_csv(csv_path)
+        # Extraer FLOPs reales
+        total_flops = sum([evt.flops for evt in prof.key_averages()])
+        epoch_gflop = total_flops / 1e9
+        gflops_throughput = epoch_gflop / epoch_time
 
         val_loss, val_acc = evaluate(model, test_dl, criterion, device)
         scheduler.step()
@@ -223,24 +189,22 @@ def main():
             "val_acc": val_acc,
             "epoch_time_s": epoch_time,
             "epoch_energy_Wh": epoch_energy,
-            "epoch_flops_GFLOP": flops_epoch / 1e9,
-            "epoch_gflops_real": gflops_real,
-            "gpu_metrics_csv": csv_path,
+            "epoch_gflop": epoch_gflop,
+            "epoch_gflops": gflops_throughput,
             "lr": scheduler.get_last_lr()[0]
         }
         log.append(stats)
 
-        print(f"Train → loss: {train_loss:.4f}, acc: {train_acc:.4f}")
-        print(f"Val   → loss: {val_loss:.4f}, acc: {val_acc:.4f}")
-        print(f"Time  → {epoch_time:.1f}s | Energy → {epoch_energy:.2f}Wh")
-        print(f"GFLOPs → {flops_epoch/1e9:.1f} GFLOP | Throughput → {gflops_real:.1f} GFLOPS")
-        print(f"GPU metrics saved to: {csv_path}")
+        print(f"Train   → loss: {train_loss:.4f}, acc: {train_acc:.4f}")
+        print(f"Val     → loss: {val_loss:.4f}, acc: {val_acc:.4f}")
+        print(f"Time    → {epoch_time:.1f}s | Energy → {epoch_energy:.2f}Wh")
+        print(f"FLOPs   → {epoch_gflop:.1f} GFLOP | Throughput → {gflops_throughput:.1f} GFLOPS")
 
         if val_acc > best_acc:
             best_acc = val_acc
             torch.save(model.state_dict(), os.path.join(args.output_dir, "best.pt"))
 
-    # Guardar métricas combinadas
+    # Guardar métricas finales
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     with open(os.path.join(args.output_dir, f"metrics_{stamp}.json"), "w") as fp:
         json.dump(log, fp, indent=2)
