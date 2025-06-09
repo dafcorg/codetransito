@@ -3,7 +3,7 @@
 #pip install torch torchvision tqdm pynvml nvidia-ml-py3
 #mkdir -p ./runs
 '''
-python train_instrumented.py \
+python resnet18UPGF.py \
   --epochs 90 \
   --batch_size 128 \
   --lr 0.1 \
