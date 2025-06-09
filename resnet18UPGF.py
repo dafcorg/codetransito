@@ -4,6 +4,7 @@ import os
 import random
 import time
 import threading
+import csv
 from datetime import datetime
 
 import torch
@@ -17,40 +18,65 @@ import pynvml
 from torch.profiler import profile, record_function, ProfilerActivity
 
 # --------------------------------------------------
-# Hilo para muestreo de potencia GPU via NVML
+# Hilo para muestreo completo de métricas GPU via NVML
 # --------------------------------------------------
-class PowerSampler(threading.Thread):
-    def __init__(self, handle, interval=1.0):
+class GPUSampler(threading.Thread):
+    def __init__(self, handle, interval=0.5):
         super().__init__(daemon=True)
         self.handle = handle
         self.interval = interval
-        self.samples = []  # [(timestamp, power_W)]
+        self.samples = []  # lista de dicts con métricas
         self._stop = threading.Event()
 
     def run(self):
         while not self._stop.is_set():
             ts = time.time()
             power_mW = pynvml.nvmlDeviceGetPowerUsage(self.handle)
-            self.samples.append((ts, power_mW / 1000.0))
+            temp = pynvml.nvmlDeviceGetTemperature(self.handle, pynvml.NVML_TEMPERATURE_GPU)
+            mem = pynvml.nvmlDeviceGetMemoryInfo(self.handle)
+            util = pynvml.nvmlDeviceGetUtilizationRates(self.handle)
+
+            self.samples.append({
+                'timestamp': ts,
+                'power_W': power_mW / 1000.0,
+                'temperature_C': temp,
+                'memory_used_MB': mem.used / (1024**2),
+                'memory_total_MB': mem.total / (1024**2),
+                'util_gpu_pct': util.gpu,
+                'util_mem_pct': util.memory
+            })
             time.sleep(self.interval)
 
     def stop(self):
         self._stop.set()
 
     def energy_wh(self):
+        # integra potencia para obtener Wh
         if len(self.samples) < 2:
             return 0.0
         energy_j = 0.0
         for i in range(1, len(self.samples)):
-            t0, p0 = self.samples[i-1]
-            t1, p1 = self.samples[i]
+            t0, p0 = self.samples[i-1]['timestamp'], self.samples[i-1]['power_W']
+            t1, p1 = self.samples[i]['timestamp'],    self.samples[i]['power_W']
             dt = t1 - t0
             energy_j += ((p0 + p1) / 2) * dt
         return energy_j / 3600.0
 
+    def dump_csv(self, filepath):
+        if not self.samples:
+            return
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        with open(filepath, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=list(self.samples[0].keys()))
+            writer.writeheader()
+            writer.writerows(self.samples)
+
+# --------------------------------------------------
+# Funciones de utilidad
+# --------------------------------------------------
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train ResNet‑18 on CIFAR‑10 (instrumented)")
+    parser = argparse.ArgumentParser(description="Train ResNet-18 on CIFAR-10 (instrumented)")
     parser.add_argument("--epochs", type=int, default=90)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=0.1)
@@ -82,8 +108,8 @@ def get_dataloaders(data_dir, batch_size):
         T.Normalize(mean, std),
     ])
     train_ds = torchvision.datasets.CIFAR10(root=data_dir, train=True, download=True, transform=train_tf)
-    test_ds  = torchvision.datasets.CIFAR10(root=data_dir, train=False, download=True, transform=test_tf)
-    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=4, pin_memory=True)
+    test_ds  = torchvision.datasets.CIFAR10(root=data_dir, train=False,download=True, transform=test_tf)
+    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
     test_dl  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
     return train_dl, test_dl
 
@@ -151,11 +177,11 @@ def main():
     for epoch in range(1, args.epochs + 1):
         print(f"\n=== Epoch {epoch}/{args.epochs} ===")
 
-        # Iniciar muestreo de potencia
-        sampler = PowerSampler(gpu_handle)
+        # Iniciar muestreo de GPU
+        sampler = GPUSampler(gpu_handle, interval=0.5)
         sampler.start()
 
-        # Medir tiempo y FLOPs reales
+        # Cronometrar y perfilar FLOPs en entrenamiento
         t0 = time.time()
         with profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
@@ -165,17 +191,19 @@ def main():
             train_loss, train_acc = train_one_epoch(model, train_dl, criterion, optimizer, device)
         t1 = time.time()
 
-        # Detener muestreo de potencia
+        # Parar sampler y calcular energía
         sampler.stop()
         sampler.join()
-
-        # Cálculos de métricas
-        epoch_time = t1 - t0
+        epoch_time   = t1 - t0
         epoch_energy = sampler.energy_wh()
 
-        # Extraer FLOPs reales
-        total_flops = sum([evt.flops for evt in prof.key_averages()])
-        epoch_gflop = total_flops / 1e9
+        # Volcar métricas GPU a CSV
+        csv_path = os.path.join(args.output_dir, f"epoch_{epoch}_gpu_metrics.csv")
+        sampler.dump_csv(csv_path)
+
+        # Extraer FLOPs
+        total_flops       = sum([evt.flops for evt in prof.key_averages()])
+        epoch_gflop       = total_flops / 1e9
         gflops_throughput = epoch_gflop / epoch_time
 
         val_loss, val_acc = evaluate(model, test_dl, criterion, device)
@@ -191,6 +219,7 @@ def main():
             "epoch_energy_Wh": epoch_energy,
             "epoch_gflop": epoch_gflop,
             "epoch_gflops": gflops_throughput,
+            "gpu_metrics_csv": csv_path,
             "lr": scheduler.get_last_lr()[0]
         }
         log.append(stats)
@@ -199,6 +228,7 @@ def main():
         print(f"Val     → loss: {val_loss:.4f}, acc: {val_acc:.4f}")
         print(f"Time    → {epoch_time:.1f}s | Energy → {epoch_energy:.2f}Wh")
         print(f"FLOPs   → {epoch_gflop:.1f} GFLOP | Throughput → {gflops_throughput:.1f} GFLOPS")
+        print(f"GPU CSV → {csv_path}")
 
         if val_acc > best_acc:
             best_acc = val_acc
