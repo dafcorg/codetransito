@@ -1,3 +1,18 @@
+#python -m venv venv
+#source venv/bin/activate      
+#pip install torch torchvision tqdm pynvml nvidia-ml-py3
+#mkdir -p ./runs
+'''
+python train_instrumented.py \
+  --epochs 90 \
+  --batch_size 128 \
+  --lr 0.1 \
+  --data_dir ./data \
+  --output_dir ./runs \
+  --gpus 1 \
+  --seed 42
+'''
+
 import argparse
 import json
 import os
