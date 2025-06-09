@@ -16,14 +16,14 @@ from tqdm import tqdm
 import pynvml
 
 # --------------------------------------------------
-# Helper: hilo para muestreo de potencia GPU via NVML
+#  hilo para muestreo de potencia GPU via NVML
 # --------------------------------------------------
 class PowerSampler(threading.Thread):
     def __init__(self, handle, interval=1.0):
         super().__init__(daemon=True)
         self.handle = handle
         self.interval = interval
-        self.samples = []  # (timestamp, power_W)
+        self.samples = []  
         self._stop = threading.Event()
 
     def run(self):
@@ -36,7 +36,6 @@ class PowerSampler(threading.Thread):
         self._stop.set()
 
     def energy_wh(self):
-        # Integra potencia (W) en Joules luego convierte a Wh
         if len(self.samples) < 2:
             return 0.0
         energy_j = 0.0
@@ -131,7 +130,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Inicializar NVML
+    
     pynvml.nvmlInit()
     gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
 
@@ -150,7 +149,6 @@ def main():
 
     for epoch in range(1, args.epochs + 1):
         print(f"\n=== Epoch {epoch}/{args.epochs} ===")
-        # Medir tiempo y energía de entrenamiento
         sampler = PowerSampler(gpu_handle)
         sampler.start()
         t0 = time.time()
@@ -182,18 +180,16 @@ def main():
         print(f"Val    → loss: {val_loss:.4f}, acc: {val_acc:.4f}")
         print(f"Time   → {epoch_time:.1f} s | Energy → {epoch_energy:.2f} Wh")
 
-        # Guardar mejor modelo
         if val_acc > best_acc:
             best_acc = val_acc
             torch.save(model.state_dict(), os.path.join(args.output_dir, "best.pt"))
 
-    # Guardar métricas
+
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     with open(os.path.join(args.output_dir, f"metrics_{stamp}.json"), "w") as fp:
         json.dump(log, fp, indent=2)
 
     print(f"Training completed. Best val acc: {best_acc:.4f}")
-    # Cleanup NVML
     pynvml.nvmlShutdown()
 
 if __name__ == "__main__":
