@@ -41,10 +41,10 @@ class GPUSampler(threading.Thread):
         self.handle = handle
         self.interval = interval
         self.samples = []  # lista de dicts con métricas
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()  # renamed to avoid conflict with Thread._stop
 
     def run(self):
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             ts = time.time()
             power_mW = pynvml.nvmlDeviceGetPowerUsage(self.handle)
             temp = pynvml.nvmlDeviceGetTemperature(self.handle, pynvml.NVML_TEMPERATURE_GPU)
@@ -63,7 +63,7 @@ class GPUSampler(threading.Thread):
             time.sleep(self.interval)
 
     def stop(self):
-        self._stop.set()
+        self._stop_event.set()  # signal thread to stop
 
     def energy_wh(self):
         # integra potencia para obtener Wh
@@ -259,3 +259,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
