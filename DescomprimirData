@@ -21,3 +21,24 @@ parallel --eta -j$(nproc) '
     tar -xf {} -C "$cls"
     rm {}
 ' ::: *.tar
+
+mkdir -p val
+
+
+tar -xf ILSVRC2012_img_val.tar -C val
+cd val
+
+wget -q https://raw.githubusercontent.com/soumith/imagenetloader.torch/master/valprep.sh
+bash valprep.sh val
+
+ls -d val/n* | wc -l
+ls val/n01440764 | wc -l
+
+cd data
+rm ILSVRC2012_img_val.tar
+
+
+nvidia-smi --query-gpu=timestamp,index,utilization.gpu,utilization.memory,\
+memory.used,temperature.gpu,power.draw --format=csv -l 1 \
+>> gpu_metrics2.csv &
+disown
