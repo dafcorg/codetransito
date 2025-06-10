@@ -1,0 +1,21 @@
+echo "1d675b47d978889d74fa0da5fadfb00e  ILSVRC2012_img_train.tar" > imagenet_md5.txt
+echo "29b22e296e4194d7f8414d56fa989667  ILSVRC2012_img_val.tar"   >> imagenet_md5.txt
+md5sum -c imagenet_md5.txt
+
+  
+ls -lh ILSVRC2012_img_val.tar    
+wc -c < ILSVRC2012_img_val.tar  
+# debe mostrar 6744924160
+
+# prueba de integridad interna (listado rápido)
+tar -tf ILSVRC2012_img_val.tar >/dev/null
+echo $?
+
+0 → el TAR es legible; quizá el checksum oficial cambió (raro). Entonces actualizas el fichero: 
+md5sum ILSVRC2012_img_val.tar
+echo "29b22e2961454d5413ddabcf34fc5622  ILSVRC2012_img_val.tar" \
+     > imagenet_md5.txt
+md5sum -c imagenet_md5.txt
+  
+>0 → error; hay bloques corruptos (lo habitual).
+
