@@ -1,0 +1,11 @@
+bash -c '
+set -e                          # aborta si algo falla
+apt-get update -qq
+DEBIAN_FRONTEND=noninteractive \
+  apt-get install -y --no-install-recommends openssh-server
+mkdir -p /run/sshd
+ssh-keygen -A                   # genera las host-keys si no existen
+chmod 600 /etc/ssh/ssh_host_*_key
+service ssh start               # levanta el demonio SSH
+sleep infinity                  # mantiene el contenedor vivo
+'
