@@ -1,0 +1,23 @@
+apt-get update -qq && apt-get install -y tmux
+apt-get install -y pigz
+tmux new -s imagenet
+
+cd /data
+mkdir -p train
+tar --use-compress-program=pigz -xf ILSVRC2012_img_train.tar -C train
+
+Ctrl+b d
+
+ls train | wc -l         # debe dar 1000 al terminar
+
+tmux attach -t imagenet 
+ls *.tar | wc -l            # debería devolver 1000
+
+cd train
+
+parallel --eta -j$(nproc) '
+    cls="{=s/.tar$//=}"
+    mkdir -p "$cls"
+    tar -xf {} -C "$cls"
+    rm {}
+' ::: *.tar
