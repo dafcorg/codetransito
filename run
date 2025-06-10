@@ -2,10 +2,13 @@ tmux new -s monitor
 tmux attach -t monitor
 nvidia-smi --query-gpu=timestamp,index,utilization.gpu,utilization.memory,memory.used,temperature.gpu,power.draw,power.limit --format=csv -l 1 >> gpu_metrics_h100_t1.csv
 
+tmux new -s train
+tmux attach -t train 
+
 python train_imagenet.py \
     --model resnet50 \
     --seed 42 \
-    --batch 256 \
+    --batch 128 \
     --epochs 90 \
     --data /data \
     --outdir /data/results \
