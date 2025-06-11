@@ -15,3 +15,5 @@ python train_imagenet.py \
     --amp | tee -a /data/master_log.txt
 
 tmux kill-session -t monitor
+
+tail -f /data/master_log.txt
